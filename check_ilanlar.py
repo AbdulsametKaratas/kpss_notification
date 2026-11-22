@@ -3,8 +3,10 @@
 import json
 import os
 import sys
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from datetime import timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -36,11 +38,11 @@ def fetch(url):
         return r.read()
 
 
-def fmt_date(s):
+def parse_date(s):
     try:
-        return parsedate_to_datetime(s).strftime("%d.%m.%Y %H:%M")
+        return parsedate_to_datetime(s)
     except Exception:  # noqa: BLE001
-        return s or ""
+        return None
 
 
 def parse_items(data):
@@ -51,13 +53,15 @@ def parse_items(data):
         guid = (it.findtext("guid") or link).strip()
         if not guid:
             continue
+        dt = parse_date((it.findtext("pubDate") or "").strip())
         items.append(
             {
                 "id": guid,
                 "link": link,
                 "title": (it.findtext("title") or "Yeni ilan").strip(),
                 "category": (it.findtext("category") or "").strip(),
-                "date": fmt_date((it.findtext("pubDate") or "").strip()),
+                "dt": dt,
+                "date": dt.strftime("%d.%m.%Y %H:%M") if dt else "",
             }
         )
     return items
@@ -68,24 +72,44 @@ def category_ok(item):
     return not wanted or any(k in norm(item["category"]) for k in wanted)
 
 
+def calendar_url(item):
+    """Tek dokunuşla Google Takvim'e ekleme linki (OAuth gerektirmez)."""
+    dt = item.get("dt")
+    if not dt:
+        return None
+    start = dt.astimezone(timezone.utc)
+    end = start + timedelta(hours=1)
+    f = "%Y%m%dT%H%M%SZ"
+    params = {
+        "action": "TEMPLATE",
+        "text": f"Kariyer Kapısı: {item['title']}"[:200],
+        "dates": f"{start.strftime(f)}/{end.strftime(f)}",
+        "details": f"{item['category']}\n{item['link']}".strip(),
+    }
+    return "https://calendar.google.com/calendar/render?" + urllib.parse.urlencode(params)
+
+
 def notify(item):
-    message = "\n".join(x for x in [item["category"], f"Tarih: {item['date']}" if item["date"] else ""] if x)
+    message = "\n".join(
+        x for x in [item["category"], f"Tarih: {item['date']}" if item["date"] else ""] if x
+    )
+    cal = calendar_url(item)
     topic = os.environ.get("NTFY_TOPIC")
     if not topic:
-        print(f"[DRY-RUN] {item['title']}\n  {message}\n  {item['link']}")
+        print(f"[DRY-RUN] {item['title']}\n  {message}\n  {item['link']}\n  takvim: {cal}")
         return
-    body = json.dumps(
-        {
-            "topic": topic,
-            "title": item["title"][:120],
-            "message": message or item["title"],
-            "click": item["link"],
-            "tags": ["bell"],
-        }
-    ).encode("utf-8")
+    payload = {
+        "topic": topic,
+        "title": item["title"][:120],
+        "message": message or item["title"],
+        "click": item["link"],
+        "tags": ["bell"],
+    }
+    if cal:
+        payload["actions"] = [{"action": "view", "label": "Takvime ekle", "url": cal}]
     req = urllib.request.Request(
         "https://ntfy.sh/",
-        data=body,
+        data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
