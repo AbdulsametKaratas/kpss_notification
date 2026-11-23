@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -26,16 +27,26 @@ def norm(s):
     return s.translate(_TR)
 
 
-def fetch(url):
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": UA,
-            "Accept": "application/rss+xml, application/xml, text/xml, */*",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return r.read()
+def fetch(url, attempts=3):
+    """Geçici hatalara karşı 3 kez dener."""
+    last = None
+    for i in range(attempts):
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": UA,
+                    "Accept": "application/rss+xml, application/xml, text/xml, */*",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.read()
+        except Exception as e:  # noqa: BLE001
+            last = e
+            print(f"  deneme {i + 1}/{attempts} başarısız: {e}", file=sys.stderr)
+            if i < attempts - 1:
+                time.sleep(5 * (i + 1))
+    raise last
 
 
 def parse_date(s):
@@ -119,15 +130,22 @@ def notify(item):
 def main():
     seen = set(json.loads(SEEN_PATH.read_text())) if SEEN_PATH.exists() else set()
     feeds = CONFIG["feeds"]
+    print(f"{len(seen)} ilan daha önce görülmüş, {len(feeds)} feed kontrol edilecek")
 
     items, feed_errors = {}, 0
     for url in feeds:
         try:
-            for it in parse_items(fetch(url)):
+            got = parse_items(fetch(url))
+            print(f"feed {url}: {len(got)} ilan")
+            for it in got:
                 items[it["id"]] = it
         except Exception as e:  # noqa: BLE001
             feed_errors += 1
             print(f"HATA feed alınamadı {url}: {e}", file=sys.stderr)
+
+    for it in items.values():
+        durum = "GÖRÜLDÜ" if it["id"] in seen else "YENİ"
+        print(f"  [{durum}] {it['title']}")
 
     new = [it for it in items.values() if it["id"] not in seen and category_ok(it)]
     print(f"{len(items)} ilan feed'de, {len(new)} yeni")
@@ -137,6 +155,7 @@ def main():
         try:
             notify(it)
             seen.add(it["id"])
+            print(f"bildirim gitti: {it['title']}")
         except Exception as e:  # noqa: BLE001
             notify_errors += 1
             print(f"HATA bildirim gitmedi ({it['title']}): {e}", file=sys.stderr)
